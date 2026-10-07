@@ -29,13 +29,13 @@ REQUIRED_COLUMNS = [
 TIER_COLOR = {HIGH: "#d62728", MEDIUM: "#ff9f1c", LOW: "#2ca02c"}
 TIER_EMOJI = {HIGH: "🔴", MEDIUM: "🟠", LOW: "🟢"}
 EW_COLOR = {"Worsening": "#d62728", "Stressed": "#ff7f0e", "Watch": "#e6c200",
-            "Stable": "#2ca02c", "No trend data": "#999999"}
-EW_EMOJI = {"Worsening": "🔴", "Stressed": "🟠", "Watch": "🟡", "Stable": "🟢", "No trend data": "⚪"}
+            "Stable": "#2ca02c", "Limited data": "#999999", "No trend data": "#999999"}
+EW_EMOJI = {"Worsening": "🔴", "Stressed": "🟠", "Watch": "🟡", "Stable": "🟢", "Limited data": "⚪", "No trend data": "⚪"}
 LAYERS = ["Priority tier", "NDVI vs normal", "Early warning (trend)"]
 LAYER_LEGEND = {
     "Priority tier": "🔴 High priority · 🟠 Medium priority · 🟢 Low priority",
     "NDVI vs normal": "🟢 at or above normal · 🟡 up to 15% below · 🟠 15-30% below · 🔴 more than 30% below",
-    "Early warning (trend)": "🔴 Worsening · 🟠 Stressed · 🟡 Watch · 🟢 Stable · ⚪ no trend data",
+    "Early warning (trend)": "🔴 Worsening · 🟠 Stressed · 🟡 Watch · 🟢 Stable · ⚪ limited or no data (cloud)",
 }
 
 if "decisions" not in st.session_state:
@@ -163,7 +163,8 @@ if has_trend:
     ew_counts = scored["ew_status"].value_counts()
     st.caption(
         f"🔔 Early warning: {int(ew_counts.get('Worsening', 0))} plots worsening, "
-        f"{int(ew_counts.get('Stressed', 0))} stressed, {int(ew_counts.get('Watch', 0))} on watch "
+        f"{int(ew_counts.get('Stressed', 0))} stressed, {int(ew_counts.get('Watch', 0))} on watch, "
+        f"{int(ew_counts.get('Limited data', 0))} with too few clear satellite readings "
         "(vegetation trend vs normal; a trend signal, not a forecast)."
     )
 
@@ -178,7 +179,7 @@ with st.expander("How the score works"):
    NDVI 40% below normal scores 100 on its own component, and so does rainfall 60% below normal.
 3. **Priority:** below {medium_t} is Low, {medium_t}-{high_t - 1} is Medium, {high_t} and above is High.
 4. **Cloud cover** above {cloud_t}% flags the plot for manual inspection.
-5. **Early warning** compares recent vegetation (NDVI) with normal and flags farms that keep falling further below it.
+5. **Early warning** compares recent vegetation (NDVI) with normal and flags farms that keep falling further below it. It needs at least 3 clear satellite readings; with fewer (monsoon cloud) it says "Limited data".
 
 Soil moisture and temperature are shown as context and do not change the score.
 Rainfall is measured at about 5 km resolution, so nearby plots share the same value; NDVI is what separates farms.
@@ -315,7 +316,13 @@ with right:
 
     ew = row["ew_status"]
     if has_trend and ew != "No trend data":
-        st.markdown(f"**Early warning:** {EW_EMOJI[ew]} {ew} (latest NDVI {row['ew_latest_pct']:+.0f}% vs normal)")
+        if ew == "Limited data":
+            st.markdown(
+                f"**Early warning:** ⚪ Limited data (latest NDVI {row['ew_latest_pct']:+.0f}% vs normal; "
+                "fewer than 3 clear satellite readings this season because of cloud)"
+            )
+        else:
+            st.markdown(f"**Early warning:** {EW_EMOJI[ew]} {ew} (latest NDVI {row['ew_latest_pct']:+.0f}% vs normal)")
         trend = pd.DataFrame(
             {"This season": row[TS_CUR_COLS].astype(float).to_numpy(),
              "Normal": row[TS_NORM_COLS].astype(float).to_numpy()},

@@ -78,13 +78,14 @@ def score_plots(df: pd.DataFrame, cfg: dict = CONFIG) -> pd.DataFrame:
     return df
 
 
-def early_warning(df: pd.DataFrame, stressed=-0.20, watch=-0.10, worsening_step=0.05) -> pd.DataFrame:
+def early_warning(df: pd.DataFrame, stressed=-0.20, watch=-0.10, worsening_step=0.05, min_readings=3) -> pd.DataFrame:
     """Adds ew_status and ew_latest_pct (latest NDVI anomaly vs normal, in %).
 
     Worsening : latest anomaly is below -10% AND at least 5 points lower than the recent average
     Stressed  : latest anomaly is below -20% but not getting worse
     Watch     : latest anomaly is between -10% and -20%
     Stable    : otherwise
+    Limited data : fewer than 3 clear satellite readings this season (monsoon cloud), so no status is given
     This is a trend signal, not a forecast.
     """
     df = df.copy()
@@ -101,11 +102,15 @@ def early_warning(df: pd.DataFrame, stressed=-0.20, watch=-0.10, worsening_step=
     status, latest_pct = [], []
     for a in anomaly:
         ok = np.flatnonzero(np.isfinite(a))
-        if len(ok) < 2:
+        if len(ok) == 0:
             status.append("No trend data")
             latest_pct.append(np.nan)
             continue
         latest = a[ok[-1]]
+        if len(ok) < min_readings:
+            status.append("Limited data")
+            latest_pct.append(round(latest * 100, 1))
+            continue
         prior = a[ok[:-1]][-3:].mean()
         if latest <= watch and latest < prior - worsening_step:
             status.append("Worsening")
