@@ -1,31 +1,40 @@
 """
-Drought-Based Smart Subsidy System - scoring engine (MVP)
+Drought-Based Smart Subsidy System - scoring engine
 
 Run with sample data:     python drought_score.py
-Run with your own data:   python drought_score.py --input my_plots.csv
+Run with your own data:   python drought_score.py --input real_plots.csv
 
-Required CSV columns for real data:
+Required CSV columns:
   plot_id, farmer, village, lat, lon,
   ndvi_current, ndvi_normal,          # plot-level vegetation (e.g. Sentinel-2)
-  rain_actual_mm, rain_normal_mm,     # village/taluka-level rainfall (e.g. CHIRPS/IMD)
+  rain_actual_mm, rain_normal_mm,     # area-level rainfall (e.g. CHIRPS/IMD)
   cloud_cover_pct                     # how cloudy the satellite pass was
+
+How it works
+  1. Trigger-1 gate: plots whose area rainfall deficit is NOT above the Trigger-1 level
+     (Maharashtra Drought Manual: more than 25% deficit) are not scored.
+  2. Score (0-100) = weighted NDVI drop + rainfall deficit.
+  3. Priority for field inspection: Low / Medium / High.
 """
 import argparse
 
 import numpy as np
 import pandas as pd
 
+LOW, MEDIUM, HIGH = "Low priority", "Medium priority", "High priority"
+
 # ---- Tunable settings (change these while you calibrate on real data) ----
 CONFIG = {
     "weights": {"ndvi": 0.7, "rain": 0.3},  # NDVI is plot-level evidence, rain is area context
-    "ndvi_drop_full": 0.40,    # NDVI 40% below normal  -> NDVI component = 100
-    "rain_deficit_full": 0.60, # rainfall 60% below normal -> rain component = 100
-    "partial_threshold": 50,   # score >= 50  -> Partial assistance
-    "full_threshold": 70,      # score >= 70  -> Full relief
-    "max_cloud_cover": 40,     # above this, flag for manual review
+    "ndvi_drop_full": 0.40,      # NDVI 40% below normal  -> NDVI component = 100
+    "rain_deficit_full": 0.60,   # rainfall 60% below normal -> rain component = 100
+    "trigger1_deficit": 0.25,    # area rainfall deficit must exceed this to be scored
+    "medium_threshold": 50,      # score >= 50 -> Medium priority
+    "high_threshold": 70,        # score >= 70 -> High priority
+    "max_cloud_cover": 40,       # above this, flag for manual review
 }
 
-PAYOUT_SHARE = {"No subsidy": 0.0, "Partial": 0.5, "Full": 1.0}
+PAYOUT_SHARE = {LOW: 0.0, MEDIUM: 0.5, HIGH: 1.0}
 BASE_SUBSIDY = 10000  # placeholder amount per plot (Rs), replace with the real scheme amount
 
 
@@ -38,17 +47,21 @@ def score_plots(df: pd.DataFrame, cfg: dict = CONFIG) -> pd.DataFrame:
     rain_score = (df["rain_deficit"] / cfg["rain_deficit_full"]).clip(0, 1) * 100
 
     w = cfg["weights"]
-    df["drought_score"] = (w["ndvi"] * ndvi_score + w["rain"] * rain_score).round(1)
+    score = (w["ndvi"] * ndvi_score + w["rain"] * rain_score).round(1)
+
+    # Trigger-1 gate: only score plots in areas that meet the rainfall-deficit test
+    df["trigger1_met"] = df["rain_deficit"] > cfg["trigger1_deficit"]
+    df["drought_score"] = score.where(df["trigger1_met"], 0.0)
 
     df["tier"] = pd.cut(
         df["drought_score"],
-        bins=[-np.inf, cfg["partial_threshold"], cfg["full_threshold"], np.inf],
-        labels=["No subsidy", "Partial", "Full"],
+        bins=[-np.inf, cfg["medium_threshold"], cfg["high_threshold"], np.inf],
+        labels=[LOW, MEDIUM, HIGH],
         right=False,
     ).astype(str)
 
     df["needs_manual_review"] = df["cloud_cover_pct"] > cfg["max_cloud_cover"]
-    df["recommended_payout"] = df["tier"].map(PAYOUT_SHARE) * BASE_SUBSIDY
+    df["indicative_payout"] = df["tier"].map(PAYOUT_SHARE) * BASE_SUBSIDY
     return df
 
 
@@ -91,12 +104,13 @@ def make_sample_data(seed: int = 42) -> pd.DataFrame:
 def impact_summary(scored: pd.DataFrame) -> dict:
     n = len(scored)
     blanket = n * BASE_SUBSIDY
-    targeted = scored["recommended_payout"].sum()
+    targeted = scored["indicative_payout"].sum()
     return {
         "total_farms": n,
-        "none": int((scored["tier"] == "No subsidy").sum()),
-        "partial": int((scored["tier"] == "Partial").sum()),
-        "full": int((scored["tier"] == "Full").sum()),
+        "high": int((scored["tier"] == HIGH).sum()),
+        "medium": int((scored["tier"] == MEDIUM).sum()),
+        "low": int((scored["tier"] == LOW).sum()),
+        "not_scored_trigger1": int((~scored["trigger1_met"]).sum()),
         "manual_review": int(scored["needs_manual_review"].sum()),
         "blanket_cost": blanket,
         "targeted_cost": targeted,
@@ -114,12 +128,13 @@ if __name__ == "__main__":
     scored = score_plots(data)
     scored.to_csv(args.output, index=False)
 
-    print("\nFarms per village by tier:")
-    print(pd.crosstab(scored["village"], scored["tier"])[["No subsidy", "Partial", "Full"]])
+    print("\nPlots per village by priority:")
+    print(pd.crosstab(scored["village"], scored["tier"])[[LOW, MEDIUM, HIGH]])
 
     s = impact_summary(scored)
-    print(f"\n{s['total_farms']} farms -> {s['full']} full, {s['partial']} partial, {s['none']} none")
+    print(f"\n{s['total_farms']} plots -> {s['high']} high, {s['medium']} medium, {s['low']} low priority")
+    print(f"{s['not_scored_trigger1']} plots not scored (area rainfall deficit below Trigger-1 level)")
     print(f"{s['manual_review']} plots flagged for manual review (cloud cover)")
-    print(f"Blanket cost: Rs {s['blanket_cost']:,.0f} | Targeted cost: Rs {s['targeted_cost']:,.0f} "
-          f"| Saved: {s['saved_pct']}%")
+    print(f"Blanket cost: Rs {s['blanket_cost']:,.0f} | Prioritised (indicative) cost: "
+          f"Rs {s['targeted_cost']:,.0f} | Difference: {s['saved_pct']}%")
     print(f"\nSaved to {args.output}")
