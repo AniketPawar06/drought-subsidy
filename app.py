@@ -5,15 +5,20 @@ Needs drought_score.py in the same folder. If real_plots.csv is in the same fold
 the app loads it automatically (an uploaded file overrides it).
 """
 import os
+import random
+import zlib
 
 import folium
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
-from drought_score import CONFIG, HIGH, LOW, MEDIUM, PAYOUT_SHARE, make_sample_data, score_plots
+from drought_score import (
+    CONFIG, HIGH, LOW, MEDIUM, PAYOUT_SHARE, TS_CUR_COLS, TS_DATES, TS_NORM_COLS,
+    early_warning, make_sample_data, score_plots,
+)
 
-st.set_page_config(page_title="Drought Smart Subsidy", page_icon="🌾", layout="wide")
+st.set_page_config(page_title="Drought-Based Smart Subsidy System", page_icon="🌾", layout="wide")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 REAL_DATA_PATH = os.path.join(BASE_DIR, "real_plots.csv")
@@ -23,6 +28,15 @@ REQUIRED_COLUMNS = [
 ]
 TIER_COLOR = {HIGH: "#d62728", MEDIUM: "#ff9f1c", LOW: "#2ca02c"}
 TIER_EMOJI = {HIGH: "🔴", MEDIUM: "🟠", LOW: "🟢"}
+EW_COLOR = {"Worsening": "#d62728", "Stressed": "#ff7f0e", "Watch": "#e6c200",
+            "Stable": "#2ca02c", "No trend data": "#999999"}
+EW_EMOJI = {"Worsening": "🔴", "Stressed": "🟠", "Watch": "🟡", "Stable": "🟢", "No trend data": "⚪"}
+LAYERS = ["Priority tier", "NDVI vs normal", "Early warning (trend)"]
+LAYER_LEGEND = {
+    "Priority tier": "🔴 High priority · 🟠 Medium priority · 🟢 Low priority",
+    "NDVI vs normal": "🟢 at or above normal · 🟡 up to 15% below · 🟠 15-30% below · 🔴 more than 30% below",
+    "Early warning (trend)": "🔴 Worsening · 🟠 Stressed · 🟡 Watch · 🟢 Stable · ⚪ no trend data",
+}
 
 if "decisions" not in st.session_state:
     st.session_state.decisions = {}  # plot_id -> "Approved" / "Rejected"
@@ -39,6 +53,18 @@ def load_csv(path: str) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def mock_profile(plot_id: str) -> dict:
+    """DEMO data only: stands in for the farmer and land registry integration."""
+    rng = random.Random(zlib.crc32(plot_id.encode()))
+    return {
+        "Survey / Gat no.": str(rng.randint(10, 400)),
+        "Farm size": f"{rng.uniform(1.0, 8.0):.1f} acres",
+        "Main crop": rng.choice(["Cotton", "Soybean", "Tur (pigeon pea)", "Maize", "Bajra"]),
+        "Irrigation": rng.choice(["Rain-fed", "Rain-fed", "Well / borewell"]),
+        "Verification": rng.choice(["Verified", "Verified", "Pending verification"]),
+    }
+
+
 # ------------------------------------------------------------------ sidebar
 with st.sidebar:
     st.header("Data")
@@ -49,6 +75,9 @@ with st.sidebar:
         st.caption("Using the bundled real_plots.csv. Upload a file to override it.")
     else:
         st.caption("No real_plots.csv found, so the app uses simulated sample data.")
+
+    st.header("Map")
+    layer = st.selectbox("Colour the map by", LAYERS)
 
     st.header("Scoring settings")
     w_ndvi = st.slider("NDVI weight (rainfall gets the rest)", 0.0, 1.0, 0.7, 0.05)
@@ -71,8 +100,8 @@ if uploaded is not None:
 elif os.path.exists(REAL_DATA_PATH):
     raw = load_csv(REAL_DATA_PATH)
     data_note = (
-        f"Data: satellite NDVI (Sentinel-2) and rainfall (CHIRPS) for {len(raw)} sampled cropland points in "
-        "Chhatrapati Sambhajinagar district, Kharif 2026. Farmer names and zones are placeholders."
+        f"Data: satellite NDVI (Sentinel-2, MODIS) and rainfall (CHIRPS) for {len(raw)} sampled cropland points in "
+        "Chhatrapati Sambhajinagar district, Kharif 2026. Farmer names, zones and farm profiles are placeholders."
     )
 else:
     raw, data_note = load_sample(), "Data: SIMULATED sample data for demonstration only."
@@ -90,11 +119,16 @@ cfg = {
     "high_threshold": high_t,
     "max_cloud_cover": cloud_t,
 }
-scored = score_plots(raw, cfg)
+scored = early_warning(score_plots(raw, cfg))
 scored["indicative_payout"] = scored["tier"].map(PAYOUT_SHARE) * base_subsidy
+has_trend = (scored["ew_status"] != "No trend data").any()
+if layer == "Early warning (trend)" and not has_trend:
+    st.sidebar.warning("This dataset has no NDVI trend columns, so the map is coloured by priority tier.")
+    layer = "Priority tier"
 
 # ------------------------------------------------------------------ header + impact
 st.title("🌾 Drought-Based Smart Subsidy System")
+st.markdown("**Farm-level drought detection and fair subsidy prioritisation**")
 st.caption(
     "Satellite screening that shows officials which farms to inspect first, with the evidence, "
     "so drought relief reaches the farms that need it. Officials verify every case."
@@ -125,6 +159,31 @@ if n_gated:
     st.caption(
         f"{n_gated} plots are in areas where the rainfall deficit is below the Trigger-1 level, so they were not scored."
     )
+if has_trend:
+    ew_counts = scored["ew_status"].value_counts()
+    st.caption(
+        f"🔔 Early warning: {int(ew_counts.get('Worsening', 0))} plots worsening, "
+        f"{int(ew_counts.get('Stressed', 0))} stressed, {int(ew_counts.get('Watch', 0))} on watch "
+        "(vegetation trend vs normal; a trend signal, not a forecast)."
+    )
+
+with st.expander("How the score works"):
+    st.markdown(
+        f"""
+**Rule-based and explainable.** There is no black-box model: every score can be traced to two measurements.
+
+1. **Trigger-1 gate.** Only plots in areas where rainfall is more than **{trigger_pct}%** below normal are scored
+   (the state's Trigger-1 rule uses a rainfall deficit above 25% plus a dry spell).
+2. **Drought stress score (0-100)** = **{w_ndvi:.0%}** × NDVI drop score + **{1 - w_ndvi:.0%}** × rainfall deficit score.
+   NDVI 40% below normal scores 100 on its own component, and so does rainfall 60% below normal.
+3. **Priority:** below {medium_t} is Low, {medium_t}-{high_t - 1} is Medium, {high_t} and above is High.
+4. **Cloud cover** above {cloud_t}% flags the plot for manual inspection.
+5. **Early warning** compares recent vegetation (NDVI) with normal and flags farms that keep falling further below it.
+
+Soil moisture and temperature are shown as context and do not change the score.
+Rainfall is measured at about 5 km resolution, so nearby plots share the same value; NDVI is what separates farms.
+        """
+    )
 
 # ------------------------------------------------------------------ selection state
 ids = scored["plot_id"].tolist()
@@ -135,7 +194,16 @@ if st.session_state.get("selected_plot") not in ids:
 by_id = scored.set_index("plot_id")
 
 
-def build_map(df: pd.DataFrame, selected: str) -> folium.Map:
+def marker_color(r, layer_name: str) -> str:
+    if layer_name == "NDVI vs normal":
+        d = r.ndvi_drop
+        return "#2ca02c" if d <= 0.0 else "#bcbd22" if d <= 0.15 else "#ff9f1c" if d <= 0.30 else "#d62728"
+    if layer_name == "Early warning (trend)":
+        return EW_COLOR[r.ew_status]
+    return TIER_COLOR[r.tier]
+
+
+def build_map(df: pd.DataFrame, selected: str, layer_name: str) -> folium.Map:
     m = folium.Map(tiles="OpenStreetMap", control_scale=True)
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
@@ -145,14 +213,15 @@ def build_map(df: pd.DataFrame, selected: str) -> folium.Map:
     for r in df.itertuples():
         is_sel = r.plot_id == selected
         review = bool(r.needs_manual_review)
+        color = marker_color(r, layer_name)
         folium.CircleMarker(
             location=[r.lat, r.lon],
             radius=11 if is_sel else 7,
-            color="black" if is_sel else ("#333333" if review else TIER_COLOR[r.tier]),
+            color="black" if is_sel else ("#333333" if review else color),
             weight=3 if is_sel else (2 if review else 1),
             dash_array="4" if (review and not is_sel) else None,
             fill=True,
-            fill_color=TIER_COLOR[r.tier],
+            fill_color=color,
             fill_opacity=0.85,
             tooltip=r.plot_id,
         ).add_to(m)
@@ -165,10 +234,10 @@ def build_map(df: pd.DataFrame, selected: str) -> folium.Map:
 left, right = st.columns([3, 2])
 
 with left:
-    st.subheader("Farm plots")
-    st.caption("🔴 High priority · 🟠 Medium priority · 🟢 Low priority · dashed dark outline = low-confidence, manual review")
+    st.subheader("Farm map")
+    st.caption(f"{LAYER_LEGEND[layer]} · dashed dark outline = low-confidence, manual review")
     map_state = st_folium(
-        build_map(scored, st.session_state.selected_plot),
+        build_map(scored, st.session_state.selected_plot, layer),
         height=520,
         use_container_width=True,
         returned_objects=["last_object_clicked_tooltip"],
@@ -183,7 +252,7 @@ with left:
             st.rerun()
 
 with right:
-    st.subheader("Evidence")
+    st.subheader("Farm profile and evidence")
     st.selectbox(
         "Select a plot (or click it on the map)",
         ids,
@@ -195,11 +264,16 @@ with right:
 
     st.markdown(f"### {sel} · {row['farmer']}")
     if row["trigger1_met"]:
-        score_text = f"drought score **{row['drought_score']:.0f} / 100**"
+        score_text = f"drought stress score **{row['drought_score']:.0f} / 100**"
     else:
         score_text = "**not scored** (area rainfall deficit below Trigger-1)"
     st.markdown(f"{TIER_EMOJI[row['tier']]} **{row['tier']}** &nbsp;|&nbsp; {score_text} &nbsp;|&nbsp; {row['village']}")
     st.caption(f"Location: {row['lat']:.5f}, {row['lon']:.5f}")
+
+    with st.expander("Farmer and farm profile (DEMO data)"):
+        for k, v in mock_profile(sel).items():
+            st.write(f"**{k}:** {v}")
+        st.caption("Placeholder values. A real rollout would pull these from the land and farmer registry.")
 
     ndvi_pct = row["ndvi_drop"] * 100
     rain_pct = row["rain_deficit"] * 100
@@ -207,6 +281,23 @@ with right:
         f"- Crop greenness (NDVI) is **{abs(ndvi_pct):.0f}% {'below' if ndvi_pct >= 0 else 'above'}** normal for this plot.\n"
         f"- Rainfall in the area is **{abs(rain_pct):.0f}% {'below' if rain_pct >= 0 else 'above'}** normal."
     )
+    if row["trigger1_met"]:
+        st.caption(
+            f"Why this score: NDVI contributes {row['ndvi_points']:.0f} points and rainfall {row['rain_points']:.0f} points "
+            f"(total {row['drought_score']:.0f})."
+        )
+
+    ctx = []
+    sm, tm = row.get("soil_moisture_anomaly_pct"), row.get("temp_max_anomaly_c")
+    if pd.notna(sm):
+        ctx.append(("Soil moisture vs normal", f"{sm:+.0f}%"))
+    if pd.notna(tm):
+        ctx.append(("Max temperature vs normal", f"{tm:+.1f} °C"))
+    if ctx:
+        mc = st.columns(len(ctx))
+        for col, (label, val) in zip(mc, ctx):
+            col.metric(label, val)
+        st.caption("Context indicators (coarse resolution). They do not change the score.")
 
     ch1, ch2 = st.columns(2)
     with ch1:
@@ -222,11 +313,36 @@ with right:
             height=180,
         )
 
+    ew = row["ew_status"]
+    if has_trend and ew != "No trend data":
+        st.markdown(f"**Early warning:** {EW_EMOJI[ew]} {ew} (latest NDVI {row['ew_latest_pct']:+.0f}% vs normal)")
+        trend = pd.DataFrame(
+            {"This season": row[TS_CUR_COLS].astype(float).to_numpy(),
+             "Normal": row[TS_NORM_COLS].astype(float).to_numpy()},
+            index=pd.to_datetime(TS_DATES),
+        )
+        st.line_chart(trend, height=200)
+        st.caption("NDVI trend through the season, 16-day periods, compared with the long-term normal.")
+    else:
+        st.caption("Early warning needs the NDVI trend columns (export with gee_export_v2.js).")
+
     if row["needs_manual_review"]:
         st.warning(
             f"Cloud cover {row['cloud_cover_pct']:.0f}% - satellite reading is low-confidence. "
             "Recommend a field inspection before approving."
         )
+
+    if ew in ("Worsening", "Stressed") or row["tier"] == HIGH:
+        with st.expander("Draft early-warning alert (demo, nothing is sent)"):
+            st.code(
+                f"Drought alert (DEMO)\n"
+                f"Plot {sel} ({row['farmer']}, {row['village']}): {row['tier']}.\n"
+                f"Crop greenness is {abs(ndvi_pct):.0f}% {'below' if ndvi_pct >= 0 else 'above'} normal; "
+                f"area rainfall is {abs(rain_pct):.0f}% {'below' if rain_pct >= 0 else 'above'} normal.\n"
+                f"Vegetation trend: {ew}.\n"
+                f"Suggested action: field inspection (GPS {row['lat']:.5f}, {row['lon']:.5f}).",
+                language="text",
+            )
 
     if row["tier"] == LOW:
         st.info("Low priority: no strong drought signal in the satellite data. "
@@ -257,7 +373,7 @@ with tab1:
             st.session_state.decisions[pid] = "Approved"
         st.rerun()
 
-    cols = ["plot_id", "farmer", "village", "tier", "drought_score",
+    cols = ["plot_id", "farmer", "village", "tier", "drought_score", "ew_status",
             "indicative_payout", "needs_manual_review", "decision"]
     st.dataframe(flagged[cols], width="stretch", hide_index=True)
 
@@ -268,8 +384,9 @@ with tab1:
         "https://www.google.com/maps?q=" + export["lat"].round(6).astype(str) + "," + export["lon"].round(6).astype(str)
     )
     export_cols = ["plot_id", "farmer", "village", "lat", "lon", "google_maps", "tier", "drought_score",
-                   "ndvi_below_normal_pct", "rain_deficit_pct", "cloud_cover_pct",
+                   "ndvi_below_normal_pct", "rain_deficit_pct", "ew_status", "cloud_cover_pct",
                    "needs_manual_review", "indicative_payout", "decision"]
+    export_cols += [c for c in ("soil_moisture_anomaly_pct", "temp_max_anomaly_c") if c in export.columns]
     st.download_button(
         "Download inspection list with GPS (CSV)",
         export[export_cols].to_csv(index=False),
