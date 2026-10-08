@@ -49,7 +49,61 @@ All thresholds can be changed with the sidebar sliders.
 
 All data is accessed through Google Earth Engine.
 
-## Repository contents
+ ## Architecture
+
+### Data and processing flow
+
+```mermaid
+flowchart TD
+    subgraph SRC["1. Open data sources"]
+        S2["Sentinel-2<br/>crop greenness, 10 m"]
+        MO["MODIS<br/>NDVI trend, 250 m"]
+        CH["CHIRPS<br/>rainfall, about 5 km"]
+        ER["ERA5-Land<br/>soil moisture and temperature"]
+        WC["ESA WorldCover and FAO GAUL<br/>cropland mask, district boundary"]
+    end
+    GEE["2. Google Earth Engine<br/>gee_export_v2.js<br/>samples cropland points"]
+    RAW["Raw CSV export<br/>(Google Drive)"]
+    CLEAN["3. make_app_csv.py<br/>clean, filter, add plot IDs"]
+    DATA["real_plots.csv"]
+    SCORE["4. drought_score.py<br/>Trigger-1 gate, stress score,<br/>priority tier, early warning"]
+    APP["5. app.py (Streamlit and folium)<br/>map, evidence, approve or reject"]
+    OUT["Inspection list<br/>(CSV with GPS)"]
+    USER["Officials and reviewers"]
+
+    SRC --> GEE --> RAW --> CLEAN --> DATA --> SCORE --> APP
+    APP --> OUT
+    APP <--> USER
+```
+
+### Deployment
+
+```mermaid
+flowchart LR
+    DEV["Developer laptop<br/>(VS Code)"] -->|upload or push| GH["GitHub repository"]
+    GH -->|auto-deploy| SC["Streamlit Community Cloud"]
+    SC --> BR["Browser<br/>(laptop or phone)"]
+```
+
+### Components
+
+| Layer | File | What it does |
+|---|---|---|
+| Data collection | `gee_export_v2.js` | Reads satellite, rainfall and weather layers at sampled cropland points and exports a CSV |
+| Data preparation | `make_app_csv.py` | Removes empty and low-vegetation points, adds plot IDs, placeholder farmer names and map zones |
+| Scoring | `drought_score.py` | Applies the Trigger-1 rainfall gate, computes the drought stress score, priority tier and early-warning status |
+| Interface | `app.py` | Interactive map, evidence panel, approve and reject workflow, downloadable inspection list |
+| Hosting | Streamlit Community Cloud | Runs the app from this repository and serves it at a public link |
+
+### Design choices
+
+- **Rule-based and explainable:** officials can see exactly why a farm was flagged. There is no black-box model.
+- **Human in the loop:** the tool recommends an inspection priority and officials make every final decision.
+- **Free, open data:** no hardware or paid data is needed, and the same method can cover other districts.
+- **Graceful fallback:** without `real_plots.csv` the app uses simulated data, and without the trend columns early warning is switched off.
+
+
+##Repository contents
 
 | File | Purpose |
 |---|---|
