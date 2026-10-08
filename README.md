@@ -2,7 +2,7 @@
 
 Farm-level drought evidence from satellite and rainfall data, so drought relief can reach the farms that need it first.
 
-**Live demo:** https://drought-subsidy-3kscipazcddc8v9i5xlkkm.streamlit.app  <!-- replace with your Streamlit link -->
+**Live demo:** https://YOUR-APP-NAME.streamlit.app  <!-- replace with your Streamlit link -->
 
 <!-- Add screenshots after uploading them to a docs/ folder, then remove the comment markers:
 ![Map view](docs/map.png)
