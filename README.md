@@ -149,6 +149,6 @@ If `real_plots.csv` is missing, the app falls back to simulated sample data.
 
 ## Built for
 
-An innovation pitching competition, October 2026.
+A National Student Innovation & Model Competition, October 2026.
 
 
