@@ -103,7 +103,7 @@ flowchart LR
 - **Graceful fallback:** without `real_plots.csv` the app uses simulated data, and without the trend columns early warning is switched off.
 
 
-##Repository contents
+## Repository contents
 
 | File | Purpose |
 |---|---|
